@@ -55,7 +55,7 @@ Para el desarrolo de este caso de estudio, realizaremos un pipeline basado en el
   6. Comparación de listas seleccionadas
   7. Análisis de importancia biológica 
 
-El código utilizado para este análisis se proporcionará en un repositorio de github[https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE106322]
+El código utilizado para este análisis se proporcionará en un repositorio de github[https://github.com/gb0406/pac1]
 
 ## 1. Librerias utilizadas en este estudio:
 
