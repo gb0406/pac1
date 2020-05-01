@@ -1,0 +1,667 @@
+---
+title: | 
+  | PAC1
+  | Análisis estadístico de microarrays
+  | Caso de estudio: "Arabidopsis degradome analysis from Tobacco rattle virus (TRV) infected plants"
+  | (<a href="https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE106322">GEO:GSE106322</a>)
+  
+author: "Giannina Bambaren Capurro"
+output: 
+  pdf_document:
+    df_print: kable
+    fig_caption: yes
+    keep_tex: yes
+    toc: yes
+    latex_engine: xelatex
+fontsize: 12pt
+bibliography: bibliografia.bib
+link-citations: yes
+---
+
+```{r setup, include=FALSE}
+require(knitr)
+require(float)
+knitr::opts_chunk$set(dev = 'pdf',echo = TRUE, message = FALSE, warning = FALSE, 
+                      comment = NA, prompt = TRUE, tidy = FALSE, 
+                      fig.width = 7, fig.height = 7, fig_caption = TRUE,
+                      cache=FALSE,fig.align='center',fig.pos = 'H')
+
+```
+
+<div style="text-align: justify">
+
+# 1. Abstract
+
+El virus _Tobacco rattle virus_ (TRV en adelante) es un virus de la familia _Virgaviridae_, este virus ssRNA(+) utiliza como vector a los nemátodos para infectar plantas ornamentales principalmente. En este estudio se han infectado inflorencencias de _Arabidopsis thaliana_ con TRV, de estas se obtuvieron para el análisis mediante microarrays de miRNAs cazado mediante el método de RLM-RACE (método descrito en: **@Zorrilla**). Mediante este estudio compararemos la expresion diferencial de genes de plantas infectadas y no infectadas.
+
+El código utilizado para este análisis se proporcionará en un repositorio de github[https://github.com/gb0406/pac1]
+
+# 2. Keyword
+
+Arabidopsis thaliana, TRV, miRNAs, Gene Expresion, Microarrays
+
+# 3. Objetivos
+
+Este estudio consiste en el identificación de la expresión diferencial de genes de _Arabidopsis thaliana_  después que sus inflorescencias fueran infectadas con el virus Tobacco rattle virus (TRV). 
+
+
+# 4. Materiales y métodos
+
+Para el desarrolo de este caso de estudio, realizaremos un pipeline basado en el análisis de microarray mediante R y Bioconductor. Los pasos que seguiremos serán:
+
+  1. Lectura de datos sin procesar
+  2. Control de calidad
+  3. Normalización
+  4. Filtrado de genes
+  5. Selección de genes expresados diferencialmente
+  6. Comparación de listas seleccionadas
+  7. Análisis de importancia biológica 
+
+
+## 4.1 Librerías utilizadas en este estudio:
+
+En este análisis utlizaremos las siguientes librerías y paquetes de R/Bioconductor que nos servirán de herramientas para estudio de este microarray:
+
+```{r dependencies, warning=FALSE, message=FALSE}
+
+require(xtable)
+require(latexpdf)
+require(tidyverse)
+require(pandoc)
+require(pander)
+require(AnnotationDbi)
+require(knitr)
+require(kableExtra)
+require(viridisLite)
+require(readr)
+require(oligo)
+require(Biobase)
+require(GEOquery)
+require(arrayQualityMetrics)
+require(genefilter)
+require(ath1121501.db)
+require(limma)
+require(ggplot2)
+require(gplots)
+source("https://raw.githubusercontent.com/uebvhir/UEB_PCA/master/UEB_plotPCA3.R")
+require(org.At.tair.db)
+require(clusterProfiler)
+require(enrichplot)
+
+```
+
+## 4.2 Diseño experimental
+
+El experimento consiste en 3 réplicas biológicas de plantas infectadas con TRV y plantas inoculadas sin virus. Cada muestra de RNA se dividió en dos grupos: muestras marcadas con RNA ligadas (RLM-RACE) y no ligadas.Las muestras se obtuvieron por separado para la hibridación de microarrays Affymetrix ATH1.
+
+## 4.3 Preparación de los datos
+
+Para la lectura de los datos hemos creado un documento **targets.cvs**, el cual presenta el nombre de cada muestra además del grupo al que pertenece cada una. 
+
+Tenemos 12 muestras que pertenecen a 4 grupos, 3 réplicas biólogicas por grupo. 
+
+```{r target, echo=FALSE,fig.cap="Grupo al que petenecen los datos"}
+
+targets = read_delim("./GSE106322/targets.csv", 
+                     ";", escape_double = FALSE, trim_ws = TRUE)
+kable(table(targets$Group),col.names=c("Grupos", "Frecuencia"),
+      caption = "Datos ordenados por el grupo","latex")%>%
+  kable_styling(latex_options = "striped", full_width = F, position = "center")
+```
+
+## 4.3.1 Lectura de los archivos en formato .CEL
+
+Nos hemos descargado y descomprimido los celFiles desde GEO, utilizando su código de acceso: GSE106322, el archivo **"GSE106322_RAW.tar"** se encuentra en la sección **Suplementary file**. 
+
+Para leer y cargar los archivos celFiles  utilizamos la librería `oligo`. La tabla **targets** creada nos servirá para asociar la información de esta tabla con los archivos CEL, a esto se le conoce como _ExpressionSet_. 
+
+Para ello utilizamos el paquete `Biobase::read.AnnotatedDataFrame`. 
+
+Guardaremos esta información en la variable **rawData**, ya que estos datos serán nuestros datos crudos (sin procesar) a analizar.
+
+
+```{r celfiles, echo=FALSE, results='hide'}
+celFiles = list.celfiles("./GSE106322", full.names = TRUE)
+myTargets = read.AnnotatedDataFrame("./GSE106322/targets.csv", header = TRUE, row.names = 1, sep=";")
+rawData = read.celfiles(celFiles, phenoData = myTargets)
+```
+
+
+```{r y, echo=FALSE, fig.cap="Tabla2: Tabla Targets",fig.pos = 'H'}
+y<-kable(pData(rawData),caption = "Tabla targets","latex") 
+kable_styling(y,latex_options =c("striped", "scale_down"))
+
+```
+
+Información almacenada en nuestro _ExpressionSet_. Para hacer más digerible el análisis, en adelante las muestras se llamarán por su nombre corto, como se muestra en la Tabla 2. 
+
+```{r expset, echo=FALSE,fig.pos = 'H'}
+colnames(rawData) = myTargets@data$ShortName
+head(rawData)
+
+```
+
+## 4.4 Control de calidad de los datos crudos
+
+Para verificar la calidad de los datos crudos, utilizamos el paquete de Bioconductor `arrayQualityMetrics`. Este nos produce un serie de  archivos que se guardarán en la carpeta **rawData_quality**, entre estos archivos se encuentra un resumen **index.html**, donde podemos ver lacalidad de nuestros datos, este analisis es de vital importancia ya que nos identifica la intesidad de los datos como además los outlier. Una mala calidad de los datos puede producirnos mucho ruido que no podrá ser resulto en la normalización de los datos.  
+
+En la Figura 1 vemos los datos que se han marcado como "outlier". Se tomaron 3 criterios para el análisis de "outliers":
+
+1. Distancia entre arrays
+  
+2. Detección de outliers mediente Boxplot
+  
+3. Detección de outliers mediante 
+
+Si uno de los datos está por encima se marca con un asterisco, ya que será un valor atípico. Si un grupo se marca más de tres veces tenemos que tener cuidado con este grupo, ya que empeora la calidad del experimento.
+
+Como vemos en la Figura 1, se han marcado más de dos veces el dato 5 que pertenece al grupo de **plantas infectadas no ligadas** y el dato 12 que pertenece al grupo de **plantas sanas no ligadas**. Quizás deberiamos no tener en cuenta estos datos para mejor el análisis.
+
+```{r}
+# library(arrayQualityMetrics)
+#arrayQualityMetrics(rawData,outdir="./Results/rawData_quality",force = T)
+```
+
+
+```{r outlier_rawdata, fig.cap="Tabla de resumen del archivo index.html, producido por el paquete arrayQualityMetrics ", echo=FALSE,fig.align='center',fig.pos = 'H',out.width='90%' }
+knitr::include_graphics("./Results/rawData_quality/metadata_outlier.png")
+```
+
+Para ver la distribución de nuestros datos, hemos realizado un análisis de componentes principales. Como vemos en la Figura 2, tenemos un mal agrupamiento de las plantas sanas e infectadas no ligadas. Como vemos el dato 5 y el 12 son los que se encuentran peor agrupados. 
+
+En nuestra gráfica de PCA podemos ver que la primera componente explica el 42.9% de la variabilidad total que se puede contribuir por la variabilidad entre estar ligado (muestras RLM) y no estar ligado, perola separación no es del todo clara. 
+
+```{r PCA, fig.cap="PCA de los datos crudos ", echo=FALSE,fig.pos = 'H',fig.align='center'}
+plotPCA3(exprs(rawData), labels = targets$ShortName, factor = targets$Group,title="RAW DATA", scale = FALSE, size = 3, colores = c("tomato", "dodgerblue", "maroon", "mediumpurple"))
+```
+
+Finalmente, veremos la distribución de la intensidad de los datos crudos mediante una gráfica boxplot. En la Figura 3 podemos ver que hay una variabilidad clara en la intensidad de estas muestras. En el caso del grupo de las plantas infectadas no ligadas veremos que existe una variación clara intragrupo, dada principalmente por la muestra 5. 
+
+Para intentar remediar la variablidad aportada por los datos vamos a normalizarlo a modo de tener datos con una distribición intragrupo homogénea, y que las diferencias que  existan entre ellos sea explicadas por la variablidad entre grupos. 
+
+```{r box_crudo, fig.cap="Boxplot de la distribución de la intesidad de los datos crudos", echo=FALSE,fig.pos = 'H'}
+boxplot(rawData, cex.axis=0.5, las=2, which="all",
+col = c(rep("tomato",3),rep("dodgerblue",3), rep("maroon",3), rep("mediumpurple",3)),
+main="Distribución de la intesidad de los datos crudos")
+```
+
+## 4.5 Normalización
+
+Como hemos dicho anteriormente, con este proceso de **normalización** intentamos aminorar los sesgos por problemas técnicos, así conseguimos centrarnos en las diferencias biólogicas entre los grupos.
+
+Para lleva a cabo la normalización de nuestros datos utilizaremos la función `rma` del paquete `oligo`, esta función realiza la corrección de fondo, normalizacion y resumen de los datos.
+
+```{r norm, echo=TRUE,results='hide'}
+eset_rma = rma(rawData)
+```
+
+Ahora en el boxplot de los datos normalizados, podemos observar que la intensidad de las muestras es homogénea, todas las muestras parecen tener el mismo aspecto, de modo que podemos decir que los datos se han normalizado correctamente.
+
+```{r box_norm, fig.cap="Boxplot de la distribución de la intesidad de los datos normalizados", echo=FALSE,fig.pos = 'H'}
+boxplot(eset_rma, cex.axis=0.5, las=2, which="all",
+col = c(rep("tomato",3),rep("dodgerblue",3), rep("maroon",3), rep("mediumpurple",3)),
+main="Distribución de la intesidad de los datos Normalizados")
+```
+
+## 4.5.1 Control de calidad de los datos normalizados
+
+Vamos a volver a realizar el control de calidad de los datos, para ver si se ha disminuído la variabilidad intragrupo.
+En la Figura 5 podemos observar que las muestras ya no nos señalan ningún "outlier".
+
+```{r outlier_norm,echo=FALSE,fig.cap="Análisis de calidad de los datos Normalizados",out.width='90%' }
+#arrayQualityMetrics(eset_rma, outdir = "./Results/normData_quality", force = T)
+knitr::include_graphics("./Results/normData_quality/metadata_norm.png")
+```
+
+En el siguiente análisis de PCA de datos normalizados que podemos ver la Figura 6, observamos que el porcentaje de explicación de la primera componente ha disminuído, y ha aumentado el porcentaje explicado por la segunda componente. En esta gráfica podemos observar un coherente agrupamiento de las muestas. Por un lado tener la primera componente que nos separía las muestas ligadas de las no ligas y por otro lado tendríamos que la segunda componente nos esta separando las muestras entre infectadas con TRV o sanas. 
+
+```{r PCA_norm, fig.cap="PCA de los datos normalizados", echo=FALSE,fig.pos = 'H'}
+
+plotPCA3(exprs(eset_rma), labels = targets$ShortName, factor = targets$Group,title="NORMALIZE DATA", scale = FALSE, size = 3, colores = c("tomato", "dodgerblue", "maroon", "mediumpurple"))
+```
+
+## 4.6 Filtraje de Genes no específico
+
+Ahora vamos a filtrar los genes que deben su variabilidad a causas aleatorias, esto aumentará la potencia del análisis. Para realizar el filtraje no especifico utilizamos la función `nsFilter` de Bioconductor` genefilter`, además utilizaremos el paquete de anotaciones de la especie, en este caso utilizaremos el paquete `ath1121501.db` que utiliza los datos de anotación **Affymetrix Arabidopsis ATH1 Genome Array**  @carlson.
+
+
+```{r annot,echo=TRUE}
+annotation(eset_rma) = "ath1121501.db"
+filtered = nsFilter(eset_rma,require.entrez = TRUE, 
+                    remove.dupEntrez = TRUE,
+                    var.filter=TRUE, 
+                    var.func=IQR, 
+                    var.cutoff=0.75, 
+                    filterByQuantile=TRUE, 
+                    feature.exclude = "^AFFX")
+eset_filtered = filtered$eset
+```
+
+
+```{r annott,echo=FALSE}
+# Guardamos los datos generados ya que son un punto de partida importante:
+#write.csv(exprs(eset_rma), file="./Results/normalized.Data.csv")
+#write.csv(exprs(eset_filtered), file="./Results/normalized.Filtered.Data.csv")
+```
+
+Despues del filtraje se han eliminado: `r dim(exprs(eset_filtered))[1]` genes. Con lo cual, en adelante utilizares estos genes en la variable *eset_filtered*
+
+## 4.7 Identificación de genes diferencialmente expresados
+
+En este punto compararemos la diferente expresión de genes entre grupos. Es decir valoraremos la diferencia expresada entre los distintos grupos de las muestras.
+
+En este experimente realizaremos una comparación de clases, donde el objetivo es señalar los genes que se expresan diferentemente entre los grupos, es decir, Genes expresados de forma diferente entre plantas sanas vs. infectadas o plantas ligadas vs. no ligadas. 
+ 
+Para el análisis estadístico de estos grupos utilizaremos el Modelo linear para microarray, este protocolo esta implementado en el paquete de Bioconductor `limma`.
+
+## 4.7.1 Matriz de diseño
+
+Para realizar el análisis basado en modelos lineales creamos una matriz de diseño donde asignamos a cada muestra el grupo al que pertenece, esta matriz presentará en nuestro caso 12 filas ya que tenemos 12 muestras y 4 colunmas que corresponden a los grupos. Si la muestra pertenece a un grupo se le asignará un **"1"**. 
+
+```{r designMat, echo=FALSE}
+designMat = model.matrix(~0+Group, pData(eset_filtered))
+colnames(designMat) = c("Mock.non.ligated", "Mock.RLM", "TRV.non.ligated", "TRV.RLM")
+
+designMat
+```
+
+## 4.7.2 Matriz de contraste
+
+Crearemos una matrix de contraste donde reflejaremos las comprareciones que realizaremos entre los grupos. Vamos a realizar 3 comparaciones:
+
+- **Efecto 1: TRV.RLM - TRV.non.ligated**, plantas infectas con TRV compararemos entre las ligadas y las no ligadas.
+    
+- **Efecto 2: Mock.RLM - Mock.non.ligated**, comparación entre los grupos de plantas sanas, ligadas versus no ligadas.
+    
+- **Interacción: TRV.RLM - Mock.RLM**, buscamos observar el efecto de la interacción entre plantas sanas e infectadas que han sufrido el método de ligación RLM-RACE.
+
+
+```{r cont.matrix,echo=FALSE}
+#library(limma)
+cont.matrix = makeContrasts (Efecto_1 = TRV.RLM - TRV.non.ligated,
+Efecto_2 = Mock.RLM - Mock.non.ligated,
+Interacion = (TRV.RLM - Mock.RLM) ,
+levels=designMat)
+print(cont.matrix)
+
+```
+
+## 4.8 Estimación de modelos y selección de genes
+
+Realizamos la estimación del modelo linear con los grupos definidos en la matriz de diseño y los genes filtrados. Mediante la función `lmFit` del paquete `limma` calcularemos el ajuste lineal de cada gen. 
+
+
+```{r fit,echo=TRUE,results='hide'}
+fit<-lmFit(eset_filtered, designMat)
+fit.main<-contrasts.fit(fit, cont.matrix)
+fit.main<-eBayes(fit.main)
+```
+
+
+## 4.8.1 Lista de expresión diferencias de genes por contraste
+
+Para cada comparación vamos a realizar una lista de genes ordenados mediante su p-valor ajustado más pequeño, para evitar un gran número de falsos positvos utilizaremos la corrección de **False Discovery rate** (FDR) con el método de Benjamini y Hochberg (BH). 
+
+Las listas de genes la obtenemos mediante la función `topTable` que extrae los genes mejor clasificados del ajuste linear anteriormente realizado. 
+
+Cada lista presenta las siguientes variables:
+
+- `logFC`: diferencia media entre grupos.
+- `AveExpr`: expresión promedio de todos los genes en la comparación.
+- `t`: estadística t moderada (estadística similar a la prueba t para la comparación).
+- `P.Value`: prueba p - valor.
+- `adj.P.Val`: valor p ajustado después de BH
+- `B`: estadística B: probabilidades de log posteriores del gen de ser versus no ser diferencial expresado.
+
+Mostraremos los 5 primeros valores de cada tabla, estos serán entonces, los mejores clasificados de cada constraste. En este caso las listas estan anotadas por el código de sonda del producto Affymetrix.
+
+```{r trv, fig.cap="Tabla 3: Efecto 1",echo=FALSE,fig.pos = 'H'}
+topTab_TRV <- topTable (fit.main, number=nrow(fit.main), coef="Efecto_1", adjust="fdr") 
+kable(topTab_TRV[1:5,],caption = "Efecto 1, Plantas infectadas TRV ligadas vs. no ligadas","latex")%>%
+  kable_styling(latex_options =c("striped", "scale_down"), position = "center")
+```
+
+```{r mock, fig.cap="Tabla 4: Efecto 2",echo=FALSE,fig.pos = 'H'}
+topTab_Mock<- topTable (fit.main, number=nrow(fit.main), coef="Efecto_2", adjust="fdr") 
+kable(topTab_Mock[1:5,],caption = "Efecto 2, Plantas  Sanas ligadas vs. no ligadas","latex")%>%
+  kable_styling(latex_options =c("striped", "scale_down"), position = "center")
+```
+
+```{r rlm, fig.cap="Tabla 5: Efecto de la interacción",echo=FALSE,fig.pos = 'H'}
+topTab_INT <- topTable (fit.main, number=nrow(fit.main), coef="Interacion", adjust="fdr") 
+kable(topTab_INT[1:5,],caption = "Interacción, Plantas ligadas Sanas vs. Infectadas","latex")%>%
+  kable_styling(latex_options =c("striped", "scale_down"), position = "center")
+```
+
+## 4.8.2 Anotación de los resultados
+
+De las lista de clasificación que hemos obtenido de nuestros contrastes que estan identificadas mediante las sondas, vamos darle "nombre" a estos códigos de Affymetrix con los genes que le corresponden. Para ello utilizamos la función `annotatedTopTable` que se basa en el uso del paquete de anotación, que para este estudio es `ath1121501.db` y la lista de sondas ordenadas por p-valor realizadas anteriormente. 
+
+La información que relacionaremos con da sonda serán: 
+
+- **"SYMBOL"**: Símbolo del nombre del gen
+    
+- **"GO"**: identificador GO del repositorio Gene Ontology
+    
+- **"GENENAME"**: Nombre completo del gen
+
+Finalmente guardaremos las tablas de anotación en archivos ".csv"
+
+```{r annotatedTopTable}
+
+ annotatedTopTable <- function(topTab, anotPackage){
+   topTab <- cbind(PROBEID=rownames(topTab), topTab)
+   myProbes <- rownames(topTab)
+   thePackage <- eval(parse(text = anotPackage))
+   geneAnots <- AnnotationDbi::select(thePackage, 
+                myProbes, c("SYMBOL", "GO", "GENENAME"))
+   annotatedTopTab<- merge(x=geneAnots, y=topTab, 
+                    by.x="PROBEID", by.y="PROBEID")
+   return(annotatedTopTab)
+}
+```
+
+```{r annot_tablas,eval=TRUE, echo=FALSE}
+# utilizamos la función para crear las tablas de anotación
+topAnnotated_TRV <- annotatedTopTable(topTab_TRV, anotPackage="ath1121501.db")
+
+topAnnotated_Mock<- annotatedTopTable(topTab_Mock,  anotPackage="ath1121501.db")
+
+topAnnotated_INT <- annotatedTopTable(topTab_INT, anotPackage="ath1121501.db")
+
+# Guardamos las tablas con las anotaciones por contraste
+#write.csv(topAnnotated_TRV, file="./Results/topAnnotated_TRV.csv")
+#write.csv(topAnnotated_Mock, file="./Results/topAnnotated_Mock.csv")
+#write.csv(topAnnotated_INT, file="./Results/topAnnotated_INT.csv")
+
+```
+
+```{r tabla_annot1,echo=FALSE,fig.cap="Tabla 6: Tablas de anotación",fig.pos = 'H'}
+kable(topAnnotated_TRV[1:2,1:6],caption = "Tabla de anotación Efecto 1","latex")%>%
+  kable_styling(latex_options =c("striped", "scale_down"), position = "center")
+```
+
+
+```{r tabla_annot2,echo=FALSE,fig.cap="Tabla 6: Tablas de anotación",fig.pos = 'H'}
+kable(topAnnotated_Mock[1:2,1:6],caption = "Tabla de anotación Efecto 2","latex")%>%
+  kable_styling(latex_options =c("striped", "scale_down"), position = "center")
+```
+
+
+```{r tabla_annot3,echo=FALSE,fig.cap="Tabla 6: Tablas de anotación",fig.pos = 'H'}
+kable(topAnnotated_INT[1:2,1:6],caption = "Tabla de anotación de la interaccón","latex")%>%
+  kable_styling(latex_options =c("striped", "scale_down"), position = "center")
+```
+
+## 4.9 Expresión diferencial
+
+## 4.9.1 Volcano plot
+
+Utilizaremos un **Volcanoplot** para observar la expresión diferencial global. El Volcanoplot es una gráfica estadística utilziada ampliamente que evalúa la magnitud del “fold change” (M, impacto biólogico del cambio) con la significación estadística de cada gen (p-valor). Por un lado, en el eje vertical tenemos -log(pvalor) y la dispersión de la función M en el eje horizontal. Los p-valores más significativos estarán en la parte superior de la gráfica. Los genes **Up y down regulated** se encuentran de forma simétrica respecto al eje vertical, donde M=0. Con lo cual nos interesa mirar los genes que se encuentran en la parte superior de la gráfica @volcano.
+
+```{r volca, echo=FALSE, fig.cap="Volcano plot",fig.pos = 'H'}
+geneSymbols <- AnnotationDbi::select(ath1121501.db, rownames(fit.main), c("SYMBOL"))
+SYMBOLS<- geneSymbols$SYMBOL
+par(mfrow=c(2,2)) 
+for (i in 1:3){
+volcanoplot(fit.main, coef=i, highlight=4, names=SYMBOLS, main=paste("Genes expresados diferencialmente", colnames(cont.matrix)[i], sep="\n"))
+abline(v=c(-1,1))
+}
+```
+
+## 4.9.2 Comparaciones múltiples
+
+En este apartado intentaremos rescatar los genes seleccionados en cada comparación posteriormente lo repsentaremos en un diagrama de Venn. Estas dos funciones se encuentran dentro del paquete `limma` que cuenta los genes que han sido seleccionados por su relevancia biológica.
+
+La selección se hace mediante el criterio FDR, donde se clasificarán valores de FDR
+
+- +1 : up-regulated
+
+- 0 : no significativo
+
+- -1 : down.regulated
+
+
+ 
+```{r compara,echo=FALSE}
+res<-decideTests(fit.main, method="separate", adjust.method="fdr", p.value=0.05, lfc=1)
+sum.res.rows<-apply(abs(res),1,sum)
+res.selected<-res[sum.res.rows!=0,] 
+summary(res)
+```
+
+Podemos ver que muchos de los genes seleccionados en los contrastes no presentan significación biológica. A pesar de ellos encontramos genes up o down regulated seleccionados en cada constraste.
+
+## 4.9.3 Diagrama de Venn
+
+La Figura 8 muestra cuántos de estos genes son compartidos por una o más comparaciones. En nuestro caso podemos ver que entre el efecto 1 y el efecto 2 se comparten 64 genes miéntras que se comparte poco con la interacción.
+ 
+```{r venn, echo=FALSE, fig.cap="Diagrama de Venn",fig.pos = 'H'}
+vennDiagram (res.selected[,1:3], cex=0.9)
+title("Genes en común entre las comparaciones\n Selección de genes con  FDR<0.05 and logFC>1")
+```
+
+## 4.9.4 Heatmap
+
+Con un heatmap podemos observar los genes que han sido seleccionados diferencialmente, mediante los colores expresados en el heatmap podemos diferencias si un gen esta up o down regulated para un grupo. 
+
+En el heatmap se representan los genes mediante su simbolo en las filas y los grupos y muestra al que pertenece cada gen en las columnas. 
+
+Vamos a representar un heatmap sin agrupamiento mediante clustering y otro con agrupamiento con cluster, de esta forma veremos que los genes se agruparan de diferente forma.
+
+```{r heat1,echo=FALSE }
+probesInHeatmap <- rownames(res.selected)
+HMdata <- exprs(eset_filtered)[rownames(exprs(eset_filtered)) %in% probesInHeatmap,]
+geneSymbols <- AnnotationDbi::select(ath1121501.db, rownames(HMdata), c("SYMBOL"))
+SYMBOLS<-na.omit(geneSymbols$SYMBOL)
+#write.csv(HMdata, file = file.path("./Results/data4Heatmap.csv"))
+```
+
+En la Figura 9 observamos que la mayoría de los genes en los grupos TRV_RLM y Mock_RLM, es decir, de plantas con tratamiento de ligación RLM-RACE se encuentra *up-regulated* respecto a las plantas que no presetan ligación (grupos TRV_non_ligated y Mock_non_ligated). En general las muestas presentan una señal homogénea intragrupo.
+
+```{r heat2,echo=FALSE,fig.cap="Heatmap de genes expresados diferencialmente sin agrupamiento",fig.pos = 'H'}
+
+coul <- viridis(50)
+heatmap.2(HMdata,
+          labRow = SYMBOLS,
+          Rowv = FALSE,
+          Colv = FALSE,
+          main = "Exresión diferencial de genes \n FDR<0,05, logFC>=1",
+          scale = "row",
+          col = coul,
+          sepcolor = "black",
+          sepwidth = c(0.05,0.05),
+          cexRow = 0.5,
+          cexCol = 0.9,
+          key = TRUE,
+          keysize = 1.5,
+          density.info = "histogram",
+          ColSideColors = c(rep("tomato",3),rep("dodgerblue",3), rep("maroon",3), rep("mediumpurple",3)),
+          tracecol = NULL,
+          dendrogram = "none",
+          srtCol = 30)
+
+```
+
+En la Figura 10 podemos ver que la distribución ahora es diferente a la anterior ya que los genes ahora se han forzado a agruparse por su similitud entre ellos. 
+
+Ahora en el heatmap se han agrupado las muestas no ligadas a la izquierda y las ligadas (RLM-RACE) a la derecha. Como veíamos en la figura anterior los genes de las muestras no ligadas en su mayoría se encuentran down-regulated mientras que los ligados se encuentran up-regulated. Salvo algunos grupos de genes de las plantas infectadas ligadas (TRV_RLM) que se encuentran down-regulated igual que las plantas mock ligadas. Los mismos pasa en el caso de las muestras no ligadas, ya que presentan un grupo de genes que se encuentran up-regulated tanto en plantas sanas como infectadas. 
+
+```{r heat3,echo=FALSE,fig.cap="Heatmap de genes expresados diferencialmente agrupados por similitud",fig.pos = 'H'}
+
+heatmap.2(HMdata,
+          labRow = SYMBOLS,
+          Rowv = TRUE,
+          Colv = TRUE,
+          dendrogram = "both",
+          main = "Expresión diferencial de genes (Cluster) \n FDR<0,05, logFC>=1",
+          scale = "row",
+          col = coul,
+          sepcolor = "white",
+          sepwidth = c(0.05,0.05),
+          cexRow = 0.5,
+          cexCol = 0.9,
+          key = TRUE,
+          keysize = 1.5,
+          density.info = "histogram",
+          ColSideColors = c(rep("tomato",3),rep("dodgerblue",3), rep("maroon",3), rep("mediumpurple",3)),
+          tracecol = NULL,
+          srtCol = 30)
+```
+
+## 4.10 Análisis de significación biológica **(“Gene Enrichment Analysis”)**
+
+Para realizar el análisis GEO, primero seleccionaremos la lista de anotaciones creada anteriormente, que contienen los genes seleccionados en cada anotación. Entonces de cada lista se comparará si los procesos biológicos en los que interviene cada conjunto de genes tienen una relación entre sí. Es decir, si en una comparación los genes seleccionados todos ellos relacionados en un proceso biológico como la división celular, etc. Esto nos daría pistas para entender las vías implicadas en cada grupo experimental.
+
+Para este tipo de análisis de enriquecimiento utilizaremos el paquete de Bioconductor CLusterProfiler @cluster_profile. Este paquete nos permite realizar análisis de enriquecimiento de conjuntos de genes de muchas ontologías. En nuestro caso utilizamos el paquete de anotación para *Arabidopsis thaliana* de Bioconductor `org.At.tair.db`. 
+
+Los pasos que seguiremos para el análisis GEO serán:
+
+- Crear un lista de las tablas de anotación antes creadas:
+  - topTab_TRVvsMock.RLM 
+  - topTab_TRVvsMock.non_ligated
+  - topTab_INT
+
+- De cada genes seleccionar los genes con un p-valor ajustado menor a 0.15, además seleccionaremos los genes mediante los simbolos, ya que el paquete de anotación `ath1121501.db` no proporciona identidicadores Entrez.
+
+- Crearemos la lista de genes a analizar mediante Clusterprofiler. Para ello como paso previo, utilizaremos la funcion `bitr` que nos convierte el símbolo de cada gen por el ENTREZID utilizando la base de datos de anotación de Arabidopsis. 
+- Detectamos algunos valores nulos es las lista de genes, con lo cual los eliminaremos para el análisis.
+
+- Finalmente, utilizaremos la función `enrichGO` para realizar el análisis GO, como `keytable` utilizaremos los código ENTREZID obtenidos mediante bitr. 
+
+```{r sigbio}
+listOfTables <- list(TRV =topTab_TRV ,  
+                     Mock = topTab_Mock, 
+                     INT = topTab_INT)
+listOfSelected <- list()
+for (i in 1:length(listOfTables)){
+  topTab <- listOfTables[[i]]
+  whichGenes<-topTab["adj.P.Val"]<0.15
+  selectedIDs <- rownames(topTab)[whichGenes]
+  GOIDs<- select(ath1121501.db, selectedIDs, c("SYMBOL"))
+  GOIDs <- GOIDs$SYMBOL
+  listOfSelected[[i]] <- GOIDs
+  names(listOfSelected)[i] <- names(listOfTables)[i]
+  }
+sapply(listOfSelected, length)
+```
+
+Podemos ver que cada comparación tiene gran cantidad de genes seleccionados **(FDR<0.15)**, estos los utilizaremos para elaborar el análisis GEO. Tenemos que tener en cuentra que eliminaremos los valores nulos que puede tener la variable ENTREZID. 
+
+```{r sigbio2,echo=FALSE}
+listOfData <- listOfSelected[1:3]
+comparisonsNames <- names(listOfData)
+```
+
+Guardaremos los resultados obtenido mediante CLUSTERprofile mediante tablas tipo archivo ".csv" y los gráfico en formato ".png"
+
+```{r sigbio3,eval=FALSE, echo=TRUE}
+for (i in 1:3){
+  comparison <- comparisonsNames[i]
+gene.df <- bitr(na.omit(listOfData[[i]]), fromType = "SYMBOL",
+        toType = c("SYMBOL","GO", "ENTREZID","GENENAME"),
+        OrgDb = org.At.tair.db)
+en_id<-na.omit(gene.df$ENTREZID)
+enrich.result <- enrichGO(gene= en_id,
+                OrgDb         = org.At.tair.db,
+                keyType       = 'ENTREZID',
+                ont           = "ALL",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.05,
+                qvalueCutoff  = 0.2)
+write.csv(as.data.frame(enrich.result),
+file =paste0("./Results/cluster/","CLUSTER_Results_",
+             comparison,".csv"), 
+row.names = FALSE)
+png(file=paste0("./Results/cluster/","CLUSTER_Barplot_",
+                comparison,".png"), 
+     width = 1080, height = 1080, units = 'px')
+print(barplot(enrich.result, showCategory = 15, font.size = 14, 
+    title = paste0("Cluster Profile Analysis for ", 
+                   comparison,". Barplot")))
+dev.off()
+png(file = paste0("./Results/cluster/","CLUSTER_cnetplot_",
+                  comparison,".png"),
+width = 1080, height = 1080, units = 'px')
+print(cnetplot(enrich.result, categorySize = "geneNum", schowCategory = 15, 
+               vertex.label.cex = 0.75))
+dev.off()
+png(file=paste0("./Results/cluster/","CLUSTER_emapplot_",
+                comparison,".png"), 
+     width = 1080, height = 1080, units = 'px')
+print(emapplot(enrich.result, pie_scale=1,layout="kk", font.size = 24, 
+    title = paste0("Cluster Profile Analysis for ",
+                   comparison,". emapplot")))
+dev.off()
+}
+```
+
+Hemos creado diferentes tipos de gráficos que nos permiten visualizar de forma más simple el análisis GEO. 
+
+En las siguientes tablas podemos observar, los términos GO (Gene Ontology) relacionados con cada grupo de genes. La ontología puede ser de tres tipos: **BP** Biological process, **MF** Molecular Function y **CC** Cellular component. También encontramos una breve descripción del término GO,  además **GeneRatio** nos indica la cantidad de genes relacionados con este término GO. 
+
+```{r sigbio4,eval=TRUE, echo=FALSE,fig.cap="Resultados Clusterprofiler para plantas infectadas",fig.pos = 'H'}
+enrich.result <- read.csv2(file.path("./Results/cluster/CLUSTER_Results_TRV.csv"), 
+                       sep = ",", header = TRUE)
+Tab.react_RLM <- enrich.result[1:4,1:4]
+kable(Tab.react_RLM, booktabs = TRUE, caption = " Análisis GEO plantas infectadas TRV","latex")%>%
+  kable_styling(latex_options =c("striped", "scale_down"), position = "center")
+```
+
+```{r sigbio5,eval=TRUE,echo=FALSE,fig.cap="Tabla 8: Resultados Clusterprofiler para plantas sanas",fig.pos = 'H'}
+Tab.react <- read.table(file.path("./Results/cluster/CLUSTER_Results_Mock.csv"), 
+                       sep = ",", header = TRUE)
+Tab.react <- Tab.react[15:19, 1:6]
+kable(Tab.react, booktabs = TRUE, caption = " Análisis GEO para plantas sanas","latex")%>%
+  kable_styling(latex_options =c("striped", "scale_down"), position = "center")
+```
+
+```{r sigbio6,eval=TRUE,echo=FALSE,fig.cap="Tabla 8: Resultados Clusterprofiler para plantas sanas vs. infectadas ligadas",fig.pos = 'H'}
+Tab.react <- read.csv2(file.path("./Results/cluster/CLUSTER_Results_INT.csv"), 
+                       sep = ",", header = TRUE)
+Tab.react <- Tab.react[50:54, 1:4]
+kable(Tab.react, booktabs = TRUE, caption = " Análisis GEO para la interacción","latex")%>%
+  kable_styling(latex_options =c("striped", "scale_down"), position = "center")
+```
+
+Un de las formas visuales que tenemos para observar este análisis es mediante gráficas. En nuestro caso hemos seleccionado tres tipos de gráficas: **Barplot**,**Cnetplot** y **Emapplot**. 
+
+En una gráfica de barplot podemos ver un diagrama de barras, donde las barras represetan un término GO y el tamaño de la barra dependerá de la cantidad de genes que este término contenga, el color de la barra representan el p-valor de enrequecimiento. Este gráfico solo representa los término GO más significaticos en el análisis. 
+
+El ejemplo que mostramos, pertenece al barplot para la interración, es decir plantas infectadas vs. plantas sanas con tratamiento RLM-RACE. En este podemos ver que los genes más abundanten entre estos dos grupos son los que estan relacionados con la biogenesis y organización de la pared celular (plant-type cell wall organization or biogenesis).
+
+
+
+```{r sigbio7,echo=FALSE,fig.cap="Barplot para plantas sanas vs. infectadas ligadas", fig.pos = 'H',out.width='70%'}
+knitr::include_graphics("./Results/cluster/CLUSTER_Barplot_INT.png")
+```
+
+El gráfico emapplot muestra los resultados obtenidos de la prueba hipergeométrica y el análisis de enriquecimiento del conjunto de genes. Donde podemos visualizar relación entre los diferentes términos GO representados en forma de red (mapa de enriquecimiento). Para el resultado de la plantas sanas vemos que presentan 34 términos GO relacionados. 
+
+```{r sigbio8,echo=FALSE,fig.cap="Emapplot para plantas sanas",fig.pos = 'H',out.width='80%'}
+knitr::include_graphics("./Results/cluster/CLUSTER_emapplot_Mock.png")
+```
+
+Finalmente, el gráfico cnetplot, representa la relación del término GO (concepto bióligico) con los genes que lo contienen. Los genes estan representados su identificador ENTREZID numérico. En este caso mostraremos el gráfico cnetplot para plantas infectadas ligadas y no ligadas.
+
+```{r sigbio9,echo=FALSE,fig.cap="Cnetplot para plantas sanas",fig.pos = 'H',out.width='70%'}
+knitr::include_graphics("./Results/cluster/CLUSTER_cnetplot_TRV.png")
+```
+
+# 5. Resultados
+
+De este análisis se han obtenido una serie de archivos que servirán para encontrar la relación existenten génica existente entre las plantas infectadas con el virus TRV respecto a las que no estan infectadas. Además, también puede ser de gran interés que algunas muestras hayan sido tratadas mnediante RLM-RACE y otras no. 
+
+Parece que existe una serie de mecanismos que se ponen en marcha en las plantas que han sufrido la ligación. Como hemos observado en la Figura 10, existe un clara diferenciación de genes que estan up-regulated cuando están ligados y down cuando estan no ligados. No hay una clara diferenciación génica entre las plantas infectadas y no infectadas. 
+
+# 6. Discusión
+
+La expresión de un gen depende de muchos factores (que transcrito se expresa, vida media del RNA mensajero, traducción, modificación,etc). En el análisis de microarray podemos ver como se comportan cientos de genes de nuestras muestras e intentar llegar a una conclusión biólogica a partir de ello. Para ellos tenemos que análisis los datos de la mejor forma posible, ya que podemos encontrar cientos de asocianes entre ellos, muchas de ellas pueden ser erróneas. Con lo cual es pertinente realizar un análisis concreto de forma que nos facilite la interpretación de las hipótesis. 
+
+Como tenemos grandes conjuntos de genes una forma de guiar el análisis es mediante el análisis funcional. En este caso hemos basado nuestroa análisis funcional en el uso de ontologías, mediante Gene Ontology (GO). Hemos encontrado que muchos de los genes expresados diferencialmente en las comparaciones realizados, son genes relacionados con los procesos biológicos (BP), sobre todo en el contraste entre plantas infectadas versus sanas tratadas con RLM-RACE. En este sentido muchos de los genes expresados (que presentan diferencias estadísticamente significativas) están relacionados con procesos biológicos vinculados a la pared celular. Esto es relevante ya que es problable que el virus de alguna manera modifice los genes relacionados con la pared celular para facilitar su entrada y así poder garantizar su infección en la planta. 
+
+Cabe señalar, que los resultados obtenidos están ligados a la forma en la que hemos efectuados los contrastes (apartado: 4.7.2 Matriz de contraste), de haber planteado los contrastes de otra manera hubieramos obtenido problamente resultados muy diferentes. Con lo cual uno de los pasos más limitantes en el desarrollo de este análisis es encontrar el constraste adecuado.
+
+# 7. Referencias
+
+</div>
